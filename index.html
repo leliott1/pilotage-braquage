@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Braquage - vue de dessus</title>
+<style>
+  :root{
+    --bg:#11151c; --panel:#1a2029; --ink:#e7edf3; --muted:#8a97a6;
+    --ok:#37d67a; --warn:#f5a623; --bad:#ff5964; --accent:#4aa3ff;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; overflow:hidden}
+  .wrap{display:flex; flex-direction:column; height:100%; max-width:860px; margin:0 auto; padding:8px}
+  header{display:flex; align-items:baseline; gap:10px; padding:2px 4px 8px}
+  header h1{font-size:16px; margin:0; font-weight:650}
+  header .sub{font-size:12px; color:var(--muted)}
+  .stage{position:relative; flex:1; min-height:0; display:flex; align-items:center; justify-content:center}
+  canvas{width:100%; height:auto; max-height:100%; background:#243019; border-radius:14px;
+    box-shadow:0 10px 30px rgba(0,0,0,.4); touch-action:none}
+  /* Banner de feedback */
+  #banner{position:absolute; top:12px; left:50%; transform:translateX(-50%);
+    padding:8px 16px; border-radius:999px; font-weight:700; font-size:15px;
+    background:rgba(0,0,0,.55); backdrop-filter:blur(6px); opacity:0; transition:opacity .2s; white-space:nowrap}
+  #banner.show{opacity:1}
+  #banner.ok{color:var(--ok)} #banner.warn{color:var(--warn)} #banner.bad{color:var(--bad)}
+  /* HUD vitesse */
+  #hud{position:absolute; top:12px; right:14px; font-size:12px; color:var(--muted); text-align:right; line-height:1.5}
+  #hud b{color:var(--ink); font-size:15px}
+  /* legende */
+  .legend{display:flex; flex-wrap:wrap; gap:10px 16px; padding:8px 6px 2px; font-size:11.5px; color:var(--muted)}
+  .legend span{display:inline-flex; align-items:center; gap:6px}
+  .dot{width:11px; height:11px; border-radius:3px; display:inline-block}
+  /* controles tactiles */
+  .pad{display:none; justify-content:space-between; padding:10px 4px 4px; gap:14px}
+  .pad .cluster{display:flex; gap:14px}
+  .btn{width:76px; height:76px; border-radius:20px; border:1px solid #2b333f; background:var(--panel);
+    color:var(--ink); font-size:26px; display:flex; align-items:center; justify-content:center;
+    user-select:none; touch-action:none; font-weight:700}
+  .btn:active,.btn.on{background:#2b3644; border-color:var(--accent)}
+  .btn.small{width:64px; height:64px; font-size:13px; border-radius:16px}
+  footer{font-size:11px; color:var(--muted); text-align:center; padding:6px 0 2px}
+  @media (pointer:coarse){ .pad{display:flex} }
+  kbd{background:#2b333f; border-radius:5px; padding:1px 6px; font-size:11px; color:var(--ink)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Le bon moment pour braquer</h1>
+    <span class="sub">tourne trop tôt = tu coupes et tu ressors large · trop tard = tu rates la corde</span>
+  </header>
+
+  <div class="stage">
+    <canvas id="c" width="800" height="600"></canvas>
+    <div id="banner"></div>
+    <div id="hud"><b id="spd">0</b> km/h<br><span id="hint">avance vers le virage</span></div>
+  </div>
+
+  <div class="legend">
+    <span><i class="dot" style="background:#4aa3ff"></i>trajectoire idéale</span>
+    <span><i class="dot" style="background:#f5a623"></i>point de braquage</span>
+    <span><i class="dot" style="background:#ff5964"></i>corde (apex)</span>
+    <span><i class="dot" style="background:#37d67a"></i>sortie</span>
+    <span><i class="dot" style="background:#e7edf3"></i>ta trace</span>
+  </div>
+
+  <div class="pad">
+    <div class="cluster">
+      <div class="btn" data-k="left">◀</div>
+      <div class="btn" data-k="right">▶</div>
+    </div>
+    <div class="cluster">
+      <div class="btn small" data-k="reset">RESET</div>
+      <div class="btn" data-k="down">▼</div>
+      <div class="btn" data-k="up">▲</div>
+    </div>
+  </div>
+
+  <footer>Clavier : <kbd>↑</kbd> accélérer · <kbd>↓</kbd> freiner · <kbd>←</kbd> <kbd>→</kbd> braquer · <kbd>R</kbd> recommencer</footer>
+</div>
+
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const banner = document.getElementById('banner');
+const spdEl = document.getElementById('spd'), hintEl = document.getElementById('hint');
+
+/* ---------- Piste ---------- */
+const halfWidth = 46;
+function buildCenterline(){
+  const pts=[];
+  for(let x=120;x<=560;x+=4) pts.push({x, y:520});          // ligne droite d'approche
+  const cx=560, cy=420, r=100;                               // virage (quart de cercle)
+  for(let a=90;a>=0;a-=2){ const rad=a*Math.PI/180; pts.push({x:cx+r*Math.cos(rad), y:cy+r*Math.sin(rad)}); }
+  for(let y=420;y>=110;y-=4) pts.push({x:660,y});            // ligne droite de sortie
+  return pts;
+}
+const CENTER = buildCenterline();
+
+// Points-repères
+const TURNIN = {x:472, y:544};   // où il faut commencer à tourner
+const APEX   = {x:600, y:460};   // la corde, à l'intérieur du virage
+const EXIT   = {x:690, y:300};   // point de sortie, à l'extérieur
+const IDEAL_TURN_X = 472, TURN_TOL = 34;
+
+// Trajectoire idéale (out-in-out), indicative
+const IDEAL = [
+  {x:120,y:548},{x:410,y:545},{x:470,y:538},{x:520,y:520},
+  {x:560,y:498},{x:585,y:478},{x:600,y:460},
+  {x:622,y:422},{x:645,y:372},{x:665,y:318},
+  {x:674,y:255},{x:666,y:180},{x:660,y:112}
+];
+
+function distToPath(x,y,path){
+  let m=1e9; for(const p of path){ const dx=x-p.x, dy=y-p.y, d=dx*dx+dy*dy; if(d<m)m=d; } return Math.sqrt(m);
+}
+
+/* ---------- Voiture ---------- */
+const START = {x:120, y:520, heading:0};
+let car, trail, state;
+function reset(){
+  car = {x:START.x, y:START.y, heading:START.heading, speed:0, steer:0};
+  trail = [];
+  state = {turnInX:null, apexMin:1e9, offTrack:false, resultShown:false, live:false};
+  showBanner('', '');
+  hintEl.textContent = 'avance vers le virage';
+}
+reset();
+
+/* ---------- Mode démo (pilotage auto pour capture) ---------- */
+const DEMO = new URLSearchParams(location.search).get('demo'); // early | good | late
+const DEMO_TURN_X = {early:380, good:472, late:548}[DEMO];
+let demoTurning = false;
+function demoDrive(){
+  const cruise = 2.2;
+  keys.up = car.speed < cruise; keys.down = false;
+  keys.left = false; keys.right = false;
+  if(car.x >= DEMO_TURN_X) demoTurning = true;
+  // sur cette piste, le virage se prend à GAUCHE (cap 0 -> -90°)
+  if(demoTurning && car.heading > -Math.PI/2 + 0.02) demoSteer = -0.148;
+  else demoSteer = 0;
+}
+let demoSteer = 0;
+
+/* ---------- Entrées ---------- */
+const keys = {up:false, down:false, left:false, right:false};
+addEventListener('keydown', e=>{
+  const k=e.key.toLowerCase();
+  if(k==='arrowup'||k==='w'||k==='z'){keys.up=true;e.preventDefault();}
+  else if(k==='arrowdown'||k==='s'){keys.down=true;e.preventDefault();}
+  else if(k==='arrowleft'||k==='a'||k==='q'){keys.left=true;e.preventDefault();}
+  else if(k==='arrowright'||k==='d'){keys.right=true;e.preventDefault();}
+  else if(k==='r'){reset();}
+});
+addEventListener('keyup', e=>{
+  const k=e.key.toLowerCase();
+  if(k==='arrowup'||k==='w'||k==='z')keys.up=false;
+  else if(k==='arrowdown'||k==='s')keys.down=false;
+  else if(k==='arrowleft'||k==='a'||k==='q')keys.left=false;
+  else if(k==='arrowright'||k==='d')keys.right=false;
+});
+// tactile
+document.querySelectorAll('.btn').forEach(b=>{
+  const k=b.dataset.k;
+  const on=e=>{e.preventDefault(); if(k==='reset'){reset();return;} keys[k]=true; b.classList.add('on');};
+  const off=e=>{e.preventDefault(); if(k!=='reset'){keys[k]=false; b.classList.remove('on');}};
+  b.addEventListener('touchstart',on,{passive:false});
+  b.addEventListener('touchend',off,{passive:false});
+  b.addEventListener('touchcancel',off,{passive:false});
+  b.addEventListener('mousedown',on); b.addEventListener('mouseup',off); b.addEventListener('mouseleave',off);
+});
+
+/* ---------- Feedback ---------- */
+function showBanner(txt, cls){
+  banner.textContent = txt;
+  banner.className = txt ? 'show '+cls : '';
+}
+
+/* ---------- Physique ---------- */
+function update(){
+  if(DEMO_TURN_X!==undefined) demoDrive();
+  // accélération
+  if(keys.up)   car.speed += 0.09;
+  if(keys.down) car.speed -= 0.14;
+  car.speed *= 0.992;                 // frottement
+  if(!keys.up && !keys.down){ car.speed *= 0.985; }
+  car.speed = Math.max(-1.4, Math.min(3.6, car.speed));
+
+  // direction (lissée)
+  const target = (DEMO_TURN_X!==undefined) ? demoSteer : (keys.left?-1:0) + (keys.right?1:0);
+  car.steer += (target - car.steer) * 0.18;
+
+  // rayon constant : la rotation dépend de la vitesse ET du braquage
+  car.heading += car.steer * car.speed * 0.036;
+  car.x += Math.cos(car.heading) * car.speed;
+  car.y += Math.sin(car.heading) * car.speed;
+
+  // hors-piste = herbe, ça freine
+  const d = distToPath(car.x, car.y, CENTER);
+  state.offTrack = d > halfWidth;
+  if(state.offTrack) car.speed *= 0.90;
+
+  // trace
+  if(Math.abs(car.speed) > 0.15){
+    trail.push({x:car.x, y:car.y, off:state.offTrack});
+    if(trail.length>1400) trail.shift();
+  }
+
+  // --- Analyse du braquage ---
+  const inApproach = car.x < 600 && car.y > 470;
+  if(inApproach && car.x>150 && state.turnInX===null && Math.abs(car.steer)>0.12 && car.speed>0.5){
+    state.turnInX = car.x;
+    if(car.x < IDEAL_TURN_X - TURN_TOL){ showBanner('Tu braques trop TÔT', 'warn'); }
+    else if(car.x > IDEAL_TURN_X + TURN_TOL){ showBanner('Tu braques trop TARD', 'bad'); }
+    else { showBanner('Bon point de braquage', 'ok'); }
+  }
+  // suivi de la corde
+  const inCorner = car.x>540 && car.y>360 && car.y<540;
+  if(inCorner){
+    const da = Math.hypot(car.x-APEX.x, car.y-APEX.y);
+    if(da < state.apexMin) state.apexMin = da;
+  }
+  // bilan à la sortie
+  if(!state.resultShown && car.y < 280 && car.x>600){
+    state.resultShown = true;
+    finalVerdict();
+  }
+
+  // HUD
+  spdEl.textContent = Math.round(Math.abs(car.speed)*55);
+  if(!state.resultShown){
+    if(car.x<430) hintEl.textContent='patiente, ne tourne pas trop tôt';
+    else if(car.x<540) hintEl.textContent='c\'est le moment de braquer';
+    else hintEl.textContent='vise la corde puis élargis';
+  }
+}
+
+function finalVerdict(){
+  let msg, cls;
+  const t = state.turnInX;
+  if(t===null){ msg='Tu n\'as pas tourné'; cls='bad'; }
+  else if(t < IDEAL_TURN_X - TURN_TOL){ msg='Trop tôt : tu coupes et tu ressors large. Attends le repère orange.'; cls='warn'; }
+  else if(t > IDEAL_TURN_X + TURN_TOL){ msg='Trop tard : tu manques la corde. Braque plus tôt.'; cls='bad'; }
+  else if(state.apexMin < 40){ msg='Parfait : bon braquage, corde touchée.'; cls='ok'; }
+  else { msg='Bon timing mais tu passes loin de la corde.'; cls='warn'; }
+  showBanner(msg, cls);
+  hintEl.textContent='appuie sur R / RESET pour recommencer';
+}
+
+/* ---------- Rendu ---------- */
+function pathTo(path){ ctx.beginPath(); ctx.moveTo(path[0].x,path[0].y); for(let i=1;i<path.length;i++) ctx.lineTo(path[i].x,path[i].y); }
+
+function drawTrack(){
+  // herbe
+  ctx.fillStyle='#2f3d1f'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#33421f';
+  for(let i=0;i<40;i++){ ctx.fillRect((i*97)%W,(i*53)%H,3,3); }
+  // bordure / vibreurs
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  pathTo(CENTER); ctx.strokeStyle='#c9ccd1'; ctx.lineWidth=2*halfWidth+10; ctx.stroke();
+  // bitume
+  pathTo(CENTER); ctx.strokeStyle='#3a4048'; ctx.lineWidth=2*halfWidth; ctx.stroke();
+  // ligne médiane
+  pathTo(CENTER); ctx.strokeStyle='rgba(240,210,80,.35)'; ctx.lineWidth=2; ctx.setLineDash([12,14]); ctx.stroke(); ctx.setLineDash([]);
+
+  // trajectoire idéale
+  ctx.beginPath(); ctx.moveTo(IDEAL[0].x,IDEAL[0].y);
+  for(let i=1;i<IDEAL.length-1;i++){ const xc=(IDEAL[i].x+IDEAL[i+1].x)/2, yc=(IDEAL[i].y+IDEAL[i+1].y)/2; ctx.quadraticCurveTo(IDEAL[i].x,IDEAL[i].y,xc,yc);}
+  ctx.strokeStyle='rgba(74,163,255,.9)'; ctx.lineWidth=3; ctx.setLineDash([9,9]); ctx.stroke(); ctx.setLineDash([]);
+
+  // repères
+  cone(TURNIN,'#f5a623','braque ici');
+  cone(APEX,'#ff5964','corde');
+  cone(EXIT,'#37d67a','sortie');
+}
+function cone(p,color,label){
+  ctx.fillStyle=color; ctx.beginPath(); ctx.arc(p.x,p.y,7,0,7); ctx.fill();
+  ctx.strokeStyle='rgba(0,0,0,.35)'; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,.85)'; ctx.font='11px sans-serif'; ctx.textAlign='center';
+  ctx.fillText(label, p.x, p.y-12);
+}
+
+function drawTrail(){
+  if(trail.length<2) return;
+  ctx.lineWidth=3; ctx.lineCap='round';
+  for(let i=1;i<trail.length;i++){
+    ctx.beginPath(); ctx.moveTo(trail[i-1].x,trail[i-1].y); ctx.lineTo(trail[i].x,trail[i].y);
+    ctx.strokeStyle = trail[i].off ? 'rgba(255,89,100,.9)' : 'rgba(231,237,243,.85)';
+    ctx.stroke();
+  }
+}
+
+function drawCar(){
+  ctx.save(); ctx.translate(car.x,car.y); ctx.rotate(car.heading);
+  // ombre
+  ctx.fillStyle='rgba(0,0,0,.3)'; roundRect(-16,-9,32,18,5); ctx.fill();
+  // carrosserie
+  const g=ctx.createLinearGradient(-16,0,16,0); g.addColorStop(0,'#ff7b54'); g.addColorStop(1,'#ff4d4d');
+  ctx.fillStyle=g; roundRect(-15,-9,30,18,5); ctx.fill();
+  // pare-brise
+  ctx.fillStyle='rgba(20,30,45,.85)'; roundRect(2,-6,7,12,2); ctx.fill();
+  // roues avant (braquées)
+  ctx.fillStyle='#111';
+  wheel(11,-11,car.steer); wheel(11,11,car.steer);
+  wheel(-11,-11,0); wheel(-11,11,0);
+  ctx.restore();
+}
+function wheel(x,y,steer){ ctx.save(); ctx.translate(x,y); ctx.rotate(steer*0.5); roundRect(-4,-2.5,8,5,1.5); ctx.fill(); ctx.restore(); }
+function roundRect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+function render(){ ctx.clearRect(0,0,W,H); drawTrack(); drawTrail(); drawCar(); }
+function loop(){ update(); render(); requestAnimationFrame(loop); }
+
+if(DEMO_TURN_X!==undefined){
+  // pas fixes pour un rendu déterministe (capture headless)
+  for(let i=0;i<500;i++) update();
+  render();
+} else {
+  loop();
+}
+</script>
+</body>
+</html>
